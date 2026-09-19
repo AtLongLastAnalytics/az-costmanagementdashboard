@@ -1,0 +1,113 @@
+name: Deploy
+
+# Runs on merge to main (or manual dispatch). Plans, waits for a manual approval on
+# the `production` environment, then applies the reviewed plan and deploys the
+# function code. Azure auth is OIDC — no stored deployment secret.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - terraform/**
+      - functions/**
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.9.8"
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+
+jobs:
+  plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: terraform init / plan
+        working-directory: terraform/envs/dev
+        run: |
+          STATE_ACCOUNT="$(az storage account list -g rg-tfstate-costviz --query '[0].name' -o tsv)"
+          terraform init -backend-config="storage_account_name=${STATE_ACCOUNT}"
+          terraform plan -input=false -out=tfplan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/envs/dev/tfplan
+          retention-days: 5
+
+  apply:
+    name: terraform apply + deploy functions
+    needs: plan
+    runs-on: ubuntu-latest
+    # The approval gate: configure required reviewers on this environment in
+    # Settings -> Environments -> production.
+    environment: production
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/envs/dev
+
+      - name: terraform apply
+        id: apply
+        working-directory: terraform/envs/dev
+        run: |
+          STATE_ACCOUNT="$(az storage account list -g rg-tfstate-costviz --query '[0].name' -o tsv)"
+          terraform init -backend-config="storage_account_name=${STATE_ACCOUNT}"
+          terraform apply -input=false tfplan
+          echo "func_name=$(terraform output -raw function_app_name)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: vendor python dependencies
+        working-directory: functions
+        run: |
+          # Force manylinux wheels so native deps (cryptography, pandas, pyarrow)
+          # match the Functions runtime's glibc, not the runner's newer one.
+          pip install \
+            --target=".python_packages/lib/site-packages" \
+            --only-binary=:all: \
+            --platform manylinux_2_28_x86_64 \
+            --platform manylinux_2_17_x86_64 \
+            --python-version 3.11 \
+            --implementation cp \
+            -r requirements.txt
+
+      - name: deploy function code
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ steps.apply.outputs.func_name }}
+          package: functions

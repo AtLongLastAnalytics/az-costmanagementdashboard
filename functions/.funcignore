@@ -1,0 +1,9 @@
+.venv/
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+requirements-dev.txt
+pyproject.toml
+*.md
+.gitignore

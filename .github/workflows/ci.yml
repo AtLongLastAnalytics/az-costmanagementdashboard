@@ -1,0 +1,102 @@
+name: CI
+
+# Validates every pull request: Terraform (fmt / tflint / checkov / plan) and the
+# Python functions (ruff / mypy / pytest). No apply happens here — deployment is in
+# deploy.yml, only on merge to main. Auth to Azure is OIDC (no stored secret).
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC federation to Azure
+
+env:
+  TF_VERSION: "1.9.8"
+  TFLINT_VERSION: "v0.54.0" # pinned: >= 0.55 has a sigstore panic on hosted runners
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+
+jobs:
+  terraform:
+    name: fmt / tflint / checkov / plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: tflint
+        working-directory: terraform
+        run: |
+          export TFLINT_CONFIG_FILE="${GITHUB_WORKSPACE}/.tflint.hcl"
+          tflint --init
+          tflint --recursive
+
+      - name: checkov
+        run: |
+          pip install --quiet checkov
+          checkov --config-file "${GITHUB_WORKSPACE}/.checkov.yaml"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: terraform init / validate / plan
+        working-directory: terraform/envs/dev
+        run: |
+          # State account name isn't committed (partial backend); resolve it.
+          STATE_ACCOUNT="$(az storage account list -g rg-tfstate-costviz --query '[0].name' -o tsv)"
+          terraform init -backend-config="storage_account_name=${STATE_ACCOUNT}"
+          terraform validate
+          terraform plan -input=false
+
+  python:
+    name: ruff / mypy / pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: functions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: mypy
+        run: mypy cost_transform cost_readapi cost_report
+
+      - name: pytest
+        run: pytest
