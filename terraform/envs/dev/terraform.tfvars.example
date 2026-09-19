@@ -1,0 +1,36 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored (never committed).
+#
+# Subscription is taken from your environment, not this file — set it via the Azure
+# CLI (`az account set --subscription <id>`) or ARM_SUBSCRIPTION_ID. The CI pipeline
+# reads it at runtime.
+
+# --- Required -----------------------------------------------------------------
+# Where budget alerts and the weekly report are emailed.
+alert_email = "you@example.com"
+
+# --- Naming / location (sensible defaults; override if you like) ---------------
+location    = "eastus"
+environment = "dev"
+name_prefix = "cmd" # resources are named <name_prefix>-<environment>-<resource>
+
+tags = {
+  owner = "you"
+}
+
+# --- Budget -------------------------------------------------------------------
+# Monthly budget amount (billing currency). Drives the Cost Management budget,
+# the alert thresholds (50/80/100%), and the dashboard's budget line.
+budget_amount = 6000
+
+# --- Schedule start dates (optional) ------------------------------------------
+# Leave empty to compute automatically (budget = first of the current month,
+# export = tomorrow), so a fresh deploy is valid in any month. Set explicit
+# RFC3339 dates only to override.
+# budget_start_date = ""
+# export_start_date = ""
+
+# --- Optional: Entra auth on the read-API (off by default) --------------------
+# Turn on to require an Entra token on the /api/costs endpoint (production).
+# Leaving it off keeps the anonymous Workbook queries working for the demo.
+# enable_api_auth    = false
+# api_auth_client_id = ""

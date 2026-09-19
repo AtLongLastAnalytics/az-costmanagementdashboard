@@ -1,0 +1,11 @@
+# Scan the deployable application IaC only. The one-time state bootstrap
+# (terraform/bootstrap) is intentionally excluded — it is a state store with a
+# different security profile and is not deployed by the pipeline.
+directory:
+  - terraform/envs
+  - terraform/modules
+framework:
+  - terraform
+compact: true
+quiet: true
+download-external-modules: false

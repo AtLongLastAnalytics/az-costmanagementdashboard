@@ -1,0 +1,22 @@
+{
+  "Microsoft.Compute": "Servers",
+  "Microsoft.ClassicCompute": "Servers",
+  "Microsoft.Storage": "Storage",
+  "Microsoft.ClassicStorage": "Storage",
+  "Microsoft.Sql": "Databases",
+  "Microsoft.DBforPostgreSQL": "Databases",
+  "Microsoft.DBforMySQL": "Databases",
+  "Microsoft.DocumentDB": "Databases",
+  "Microsoft.Cache": "Databases",
+  "Microsoft.Network": "Networking",
+  "Microsoft.Cdn": "Networking",
+  "Microsoft.Web": "Web & Apps",
+  "Microsoft.App": "Web & Apps",
+  "Microsoft.KeyVault": "Security",
+  "Microsoft.Insights": "Monitoring",
+  "Microsoft.OperationalInsights": "Monitoring",
+  "Microsoft.ContainerService": "Containers",
+  "Microsoft.ContainerRegistry": "Containers",
+  "Microsoft.CognitiveServices": "AI",
+  "Microsoft.MachineLearningServices": "AI"
+}

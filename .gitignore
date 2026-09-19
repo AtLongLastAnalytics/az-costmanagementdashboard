@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Local agent / editor tooling — not part of the deliverable
+# ---------------------------------------------------------------------------
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claudeignore
+.mcp.json
+
+# Internal process tooling — excluded from the published showcase
+scripts/set-board-status.sh
+scripts/seed-github-backlog.sh
+
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+# Partial backend config (holds the state account name) — keep local, never commit
+backend.hcl
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# Note: .terraform.lock.hcl IS committed on purpose (provider pinning) — do not ignore it.
+
+# ---------------------------------------------------------------------------
+# Python / Azure Functions
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+bin/
+obj/
+local.settings.json
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

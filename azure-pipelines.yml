@@ -1,0 +1,258 @@
+# ---------------------------------------------------------------------------
+# Azure DevOps pipeline — Azure Cost Visibility Platform (US-1.3).
+# Flow: Plan (fmt/tflint/checkov + terraform plan, published as an artifact)
+#       -> manual approval -> Apply (applies the reviewed plan). OIDC auth, no
+#       stored secrets, remote state.
+#
+# Service connections can't be referenced from a runtime variable, so it is a
+# compile-time parameter. PR validation is wired via an Azure Repos branch
+# policy (Build Validation) which runs Plan only — Azure Repos ignores `pr:`.
+#
+# Prereqs (one-time, ADO portal — see docs/devnotes.md):
+#   - Service connection `azure-cost-visibility-oidc` (ARM -> Workload Identity
+#     Federation). Its identity needs Contributor on the subscription AND
+#     Storage Blob Data Contributor on the tfstate storage account.
+#   - Environment `cost-visibility-dev` with an approval check (the apply gate).
+# ---------------------------------------------------------------------------
+
+parameters:
+  - name: serviceConnection
+    type: string
+    default: azure-cost-visibility-oidc
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - terraform/*
+      - functions/*
+      - azure-pipelines.yml
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: tfRoot
+    value: terraform
+  - name: tfWorkingDir
+    value: terraform/envs/dev
+  - name: tfVersion
+    value: 1.9.8
+
+stages:
+  - stage: Plan
+    displayName: Validate and plan
+    jobs:
+      - job: plan
+        displayName: fmt / tflint / checkov / plan
+        steps:
+          - task: Bash@3
+            displayName: Install Terraform
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                temp_dir="$(mktemp -d)"; trap 'rm -rf "${temp_dir}"' EXIT
+                curl -fsSL -o "${temp_dir}/tf.zip" "https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip"
+                unzip -o "${temp_dir}/tf.zip" -d "${temp_dir}"
+                sudo install -m 0755 "${temp_dir}/terraform" /usr/local/bin/terraform
+                terraform version
+
+          - task: Bash@3
+            displayName: Install TFLint
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                # Pin to a pre-attestation release: tflint >= 0.55 has a sigstore
+                # nil-pointer panic verifying plugin signatures on hosted agents.
+                # Download the release zip directly (the install_linux.sh script path
+                # is unreliable and has 404'd).
+                TFLINT_VERSION="v0.54.0"
+                tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' EXIT
+                curl -fsSL -o "${tmp}/tflint.zip" \
+                  "https://github.com/terraform-linters/tflint/releases/download/${TFLINT_VERSION}/tflint_linux_amd64.zip"
+                unzip -o "${tmp}/tflint.zip" -d "${tmp}"
+                sudo install -m 0755 "${tmp}/tflint" /usr/local/bin/tflint
+                tflint --version
+
+          - task: Bash@3
+            displayName: terraform fmt -check + tflint
+            inputs:
+              targetType: inline
+              workingDirectory: $(tfRoot)
+              script: |
+                set -euo pipefail
+                terraform fmt -check -recursive
+                export TFLINT_CONFIG_FILE="$(Build.SourcesDirectory)/.tflint.hcl"
+                tflint --init
+                tflint --recursive
+
+          - task: Bash@3
+            displayName: checkov
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                pip install --quiet checkov
+                checkov --config-file "$(Build.SourcesDirectory)/.checkov.yaml"
+
+          - task: AzureCLI@2
+            displayName: terraform init / validate / plan
+            env:
+              # Non-secret deploy input, supplied as a pipeline variable so it isn't
+              # committed. Set `alertEmail` in the ADO pipeline's variables.
+              TF_VAR_alert_email: $(alertEmail)
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              workingDirectory: $(tfWorkingDir)
+              inlineScript: |
+                set -euo pipefail
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                # State account name isn't committed (partial backend); resolve it
+                # from the state resource group at init time.
+                STATE_ACCOUNT="$(az storage account list -g rg-tfstate-costviz --query '[0].name' -o tsv)"
+                terraform init -backend-config="storage_account_name=${STATE_ACCOUNT}"
+                terraform validate
+                terraform plan -input=false -out=tfplan
+
+          - publish: $(tfWorkingDir)/tfplan
+            artifact: tfplan
+
+      - job: python
+        displayName: ruff / mypy / pytest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.11"
+
+          - task: Bash@3
+            displayName: Install dependencies
+            inputs:
+              targetType: inline
+              workingDirectory: functions
+              script: |
+                set -euo pipefail
+                python -m pip install --upgrade pip
+                pip install -r requirements-dev.txt
+
+          - task: Bash@3
+            displayName: ruff
+            inputs:
+              targetType: inline
+              workingDirectory: functions
+              script: |
+                set -euo pipefail
+                ruff check .
+                ruff format --check .
+
+          - task: Bash@3
+            displayName: mypy
+            inputs:
+              targetType: inline
+              workingDirectory: functions
+              script: |
+                set -euo pipefail
+                mypy cost_transform cost_readapi cost_report
+
+          - task: Bash@3
+            displayName: pytest
+            inputs:
+              targetType: inline
+              workingDirectory: functions
+              script: |
+                set -euo pipefail
+                pytest
+
+  - stage: Apply
+    displayName: Apply (main only)
+    dependsOn: Plan
+    condition: >-
+      and(succeeded(),
+          ne(variables['Build.Reason'], 'PullRequest'),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: apply
+        displayName: terraform apply
+        environment: cost-visibility-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - download: current
+                  artifact: tfplan
+
+                - task: Bash@3
+                  displayName: Install Terraform
+                  inputs:
+                    targetType: inline
+                    script: |
+                      set -euo pipefail
+                      temp_dir="$(mktemp -d)"; trap 'rm -rf "${temp_dir}"' EXIT
+                      curl -fsSL -o "${temp_dir}/tf.zip" "https://releases.hashicorp.com/terraform/$(tfVersion)/terraform_$(tfVersion)_linux_amd64.zip"
+                      unzip -o "${temp_dir}/tf.zip" -d "${temp_dir}"
+                      sudo install -m 0755 "${temp_dir}/terraform" /usr/local/bin/terraform
+                      terraform version
+
+                - task: AzureCLI@2
+                  displayName: terraform init / apply
+                  inputs:
+                    azureSubscription: ${{ parameters.serviceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    workingDirectory: $(tfWorkingDir)
+                    inlineScript: |
+                      set -euo pipefail
+                      export ARM_USE_OIDC=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                      STATE_ACCOUNT="$(az storage account list -g rg-tfstate-costviz --query '[0].name' -o tsv)"
+                      terraform init -backend-config="storage_account_name=${STATE_ACCOUNT}"
+                      terraform apply -input=false "$(Pipeline.Workspace)/tfplan/tfplan"
+                      FUNC_NAME=$(terraform output -raw function_app_name)
+                      echo "##vso[task.setvariable variable=funcAppName]$FUNC_NAME"
+
+                - task: UsePythonVersion@0
+                  displayName: Use Python 3.11
+                  inputs:
+                    versionSpec: "3.11"
+
+                - task: Bash@3
+                  displayName: Vendor Python dependencies
+                  inputs:
+                    targetType: inline
+                    workingDirectory: functions
+                    script: |
+                      set -euo pipefail
+                      # Force manylinux_2_28 wheels so native deps (cryptography, pandas,
+                      # pyarrow) match the Functions runtime's glibc, not the agent's newer one.
+                      pip install \
+                        --target=".python_packages/lib/site-packages" \
+                        --only-binary=:all: \
+                        --platform manylinux_2_28_x86_64 \
+                        --platform manylinux_2_17_x86_64 \
+                        --python-version 3.11 \
+                        --implementation cp \
+                        -r requirements.txt
+
+                - task: AzureFunctionApp@2
+                  displayName: Deploy function code
+                  inputs:
+                    azureSubscription: ${{ parameters.serviceConnection }}
+                    appType: functionAppLinux
+                    appName: $(funcAppName)
+                    package: $(Build.SourcesDirectory)/functions
+                    runtimeStack: "PYTHON|3.11"

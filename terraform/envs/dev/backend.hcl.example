@@ -1,0 +1,10 @@
+# Partial backend config for local runs. Copy to backend.hcl (git-ignored) and set
+# the storage account name your bootstrap produced (it carries a random suffix),
+# then initialise with:
+#
+#   terraform init -backend-config=backend.hcl
+#
+# The CI/CD pipeline resolves this automatically from the state resource group, so
+# backend.hcl is only needed when running Terraform from your machine.
+
+storage_account_name = "sttfstatecostviz<suffix>"
